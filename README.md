@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # URL Shortener
 
 A small Flask app built as the foundation for a CI/CD pipeline project.
@@ -60,10 +60,3 @@ just running for show.
 ## Roadmap
 See [PRD.md](./PRD.md) — next steps are containerizing the deploy step
 and wiring up GitOps-based CD.
-=======
-# shorternintegretedwcicd
-
-a simple shorter using flask 
-integrating the cicd pipline 
-13 august 2026
->>>>>>> de246c6eb5421cad2fad40c70afd699ff2c6d501
