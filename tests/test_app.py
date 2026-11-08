@@ -1,5 +1,4 @@
 import pytest
-
 from app import app as flask_app, db
 
 
@@ -18,7 +17,15 @@ def client():
 def test_health(client):
     res = client.get("/health")
     assert res.status_code == 200
-    assert res.get_json()["status"] == "ok"
+    data = res.get_json()
+    assert data["status"] == "ok"
+    assert data["database"] == "connected"
+
+
+def test_index_page(client):
+    res = client.get("/")
+    assert res.status_code == 200
+    assert b"URL Shortener" in res.data or b"html" in res.data.lower()
 
 
 def test_shorten_valid_url(client):

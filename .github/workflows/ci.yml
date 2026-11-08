@@ -1,47 +1,271 @@
-name: CI
+name: CI/CD Pipeline
 
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # ============================================================================
+  # 1. TEST & LINT (Required Status Check)
+  # ============================================================================
   test:
+    name: Lint & Unit Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Install dependencies
-        run: pip install -r requirements-dev.txt
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
 
-      - name: Verify environment
+      - name: Verify Environment Dependencies
         run: python check_deps.py
 
-      - name: Lint
+      - name: Code Quality & Lint (flake8)
         run: flake8 app.py tests/ --max-line-length=100
 
-      - name: Run tests with coverage
-        run: pytest tests/ -v --cov=app --cov-report=term-missing
+      - name: Run Pytest with Coverage
+        run: pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=xml
 
-  build:
+  # ============================================================================
+  # 2. BUILD, SMOKE TEST & SECURITY SCAN (Required Status Check)
+  # ============================================================================
+  build-and-scan:
+    name: Docker Build & Vulnerability Scan
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
-      - name: Build Docker image
-        run: docker build -t url-shortener:${{ github.sha }} .
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Smoke test container
+      - name: Build Local Image for Validation
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: url-shortener:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Container Smoke Test (Liveness & Dynamic Port Probe)
         run: |
-          docker run -d -p 5000:5000 --name smoke url-shortener:${{ github.sha }}
-          sleep 3
-          curl -f http://localhost:5000/health
-          docker stop smoke
+          echo "Starting container on test port 8080..."
+          docker run -d -e PORT=8080 -p 8080:8080 --name smoke-test url-shortener:${{ github.sha }}
+          
+          # Retry loop waiting for container readiness
+          for i in {1..15}; do
+            if curl -sf http://localhost:8080/health; then
+              echo -e "\nSmoke test passed: /health returned HTTP 200"
+              docker stop smoke-test
+              exit 0
+            fi
+            echo "Waiting for container startup (attempt $i/15)..."
+            sleep 1
+          done
+          
+          echo "Smoke test failed: container did not become healthy"
+          docker logs smoke-test
+          docker stop smoke-test
+          exit 1
+
+      - name: Run Trivy Vulnerability Scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: url-shortener:${{ github.sha }}
+          format: 'table'
+          exit-code: '0'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Generate SARIF Security Report
+        uses: aquasecurity/trivy-action@0.28.0
+        if: always()
+        with:
+          image-ref: url-shortener:${{ github.sha }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy Results to GitHub Security Tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && github.repository_owner != ''
+        continue-on-error: true
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # ============================================================================
+  # 3. PUBLISH TO GITHUB CONTAINER REGISTRY (GHCR)
+  # ============================================================================
+  publish:
+    name: Publish to GHCR
+    needs: [test, build-and-scan]
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker Metadata & Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+
+  # ============================================================================
+  # 4. CONTINUOUS DEPLOYMENT: DEV ENVIRONMENT (Automated)
+  # ============================================================================
+  deploy-dev:
+    name: Deploy to Dev
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: ${{ steps.deploy.outputs.env_url || 'https://dev-shortener.example.com' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Trigger Dev Deployment
+        id: deploy
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "Target Image: ghcr.io/${{ github.repository }}:sha-${SHORT_SHA}"
+          
+          if [ -n "${{ secrets.DEV_DEPLOY_HOOK_URL }}" ]; then
+            echo "Calling automated webhook deploy hook for Dev..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.DEV_DEPLOY_HOOK_URL }}")
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo "Deploy trigger acknowledged (HTTP $HTTP_CODE)"
+            else
+              echo "Deploy webhook returned HTTP $HTTP_CODE"
+              exit 1
+            fi
+          else
+            echo "DEV_DEPLOY_HOOK_URL not configured. Simulated CD execution completed for dev environment."
+            echo "To connect live, add DEV_DEPLOY_HOOK_URL in repository Settings -> Environments -> dev -> Secrets."
+          fi
+          echo "env_url=https://dev-shortener.example.com" >> $GITHUB_OUTPUT
+
+      - name: Dev Post-Deployment Verification Probe
+        if: env.DEV_URL != ''
+        env:
+          DEV_URL: ${{ secrets.DEV_APP_URL }}
+        run: |
+          echo "Verifying health of $DEV_URL/health..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$DEV_URL/health" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Dev environment verified healthy!"
+              exit 0
+            fi
+            echo "Waiting for dev instance readiness ($STATUS) - attempt $i/10..."
+            sleep 6
+          done
+          echo "Dev instance failed health verification."
+          exit 1
+
+  # ============================================================================
+  # 5. GATED PRODUCTION PROMOTION (Manual Approval Gate via Environment)
+  # ============================================================================
+  promote-prod:
+    name: Promote to Production
+    needs: deploy-dev
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.promote.outputs.prod_url || 'https://prod-shortener.example.com' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy Immutable Image to Production
+        id: promote
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          PROMOTED_IMAGE="ghcr.io/${{ github.repository }}:sha-${SHORT_SHA}"
+          echo "Promoting verified image to Production: $PROMOTED_IMAGE"
+          
+          if [ -n "${{ secrets.PROD_DEPLOY_HOOK_URL }}" ]; then
+            echo "Executing production deploy webhook..."
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.PROD_DEPLOY_HOOK_URL }}")
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+              echo "Production deployment initiated (HTTP $HTTP_CODE)"
+            else
+              echo "Production webhook failed with HTTP $HTTP_CODE"
+              exit 1
+            fi
+          else
+            echo "PROD_DEPLOY_HOOK_URL not configured. Simulated CD promotion completed."
+            echo "To connect live, add PROD_DEPLOY_HOOK_URL in repository Settings -> Environments -> production -> Secrets."
+          fi
+          echo "prod_url=https://prod-shortener.example.com" >> $GITHUB_OUTPUT
+
+      - name: Production Post-Deployment Smoke Check
+        if: env.PROD_URL != ''
+        env:
+          PROD_URL: ${{ secrets.PROD_APP_URL }}
+        run: |
+          echo "Verifying health of production: $PROD_URL/health..."
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$PROD_URL/health" || true)
+            if [ "$STATUS" = "200" ]; then
+              echo "Production environment verified healthy!"
+              exit 0
+            fi
+            echo "Waiting for production service ($STATUS) - attempt $i/10..."
+            sleep 6
+          done
+          echo "CRITICAL: Production health probe failed! Triggering rollback alert."
+          exit 1

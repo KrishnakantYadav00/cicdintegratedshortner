@@ -6,11 +6,26 @@ from datetime import datetime, timezone
 
 from flask import Flask, request, redirect, jsonify, render_template
 from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import text
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get(
-    "DATABASE_URL", "sqlite:///urls.db"
-)
+
+# Determine database URI:
+# 1. Check DATABASE_URL environment variable
+# 2. Check if /data directory exists (Docker volume mount) -> sqlite:////data/urls.db
+# 3. Fallback to local SQLite file -> sqlite:///urls.db
+raw_db_url = os.environ.get("DATABASE_URL")
+if raw_db_url:
+    # Heroku/Render/Supabase compatibility: convert postgres:// to postgresql://
+    if raw_db_url.startswith("postgres://"):
+        raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
+    db_url = raw_db_url
+elif os.path.isdir("/data"):
+    db_url = "sqlite:////data/urls.db"
+else:
+    db_url = "sqlite:///urls.db"
+
+app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 db = SQLAlchemy(app)
@@ -56,8 +71,24 @@ def is_valid_url(url: str) -> bool:
 
 @app.route("/health")
 def health():
-    """Used by CI/CD readiness & liveness probes."""
-    return jsonify(status="ok"), 200
+    """Used by CI/CD readiness & liveness probes.
+
+    Verifies both web server liveness and database connectivity.
+    """
+    try:
+        db.session.execute(text("SELECT 1"))
+        return jsonify(
+            status="ok",
+            database="connected",
+            db_engine=db.engine.name,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        ), 200
+    except Exception as exc:
+        return jsonify(
+            status="unhealthy",
+            database="disconnected",
+            error=str(exc)
+        ), 503
 
 
 @app.route("/api/shorten", methods=["POST"])
@@ -122,4 +153,5 @@ def create_tables():
 
 if __name__ == "__main__":
     create_tables()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)

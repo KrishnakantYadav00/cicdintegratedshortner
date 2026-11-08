@@ -6,6 +6,7 @@ Exits non-zero (and prints what's missing) if anything fails,
 so it can also be dropped into CI as a fast pre-flight step.
 """
 import importlib
+import importlib.metadata
 import subprocess
 import sys
 
@@ -13,6 +14,10 @@ REQUIRED_MODULES = [
     ("flask", "Flask"),
     ("flask_sqlalchemy", "Flask-SQLAlchemy"),
     ("gunicorn", "gunicorn"),
+]
+
+OPTIONAL_MODULES = [
+    ("psycopg2", "psycopg2-binary (PostgreSQL production support)"),
 ]
 
 DEV_MODULES = [
@@ -31,15 +36,20 @@ def check_python_version():
     return ok
 
 
-def check_module(import_name, display_name):
+def check_module(import_name, display_name, required=True):
     try:
-        mod = importlib.import_module(import_name)
-        version = getattr(mod, "__version__", "unknown")
+        importlib.import_module(import_name)
+        try:
+            pkg_name = import_name.replace("_", "-")
+            version = importlib.metadata.version(pkg_name)
+        except Exception:
+            version = "installed"
         print(f"[OK] {display_name} ({version})")
         return True
     except ImportError:
-        print(f"[FAIL] {display_name} not installed")
-        return False
+        status = "FAIL" if required else "OPTIONAL"
+        print(f"[{status}] {display_name} not installed")
+        return not required
 
 
 def check_git():
@@ -60,11 +70,15 @@ def main():
 
     print("\n== Required packages ==")
     for import_name, display_name in REQUIRED_MODULES:
-        results.append(check_module(import_name, display_name))
+        results.append(check_module(import_name, display_name, required=True))
+
+    print("\n== Optional packages (Production Drivers) ==")
+    for import_name, display_name in OPTIONAL_MODULES:
+        check_module(import_name, display_name, required=False)
 
     print("\n== Dev/test packages ==")
     for import_name, display_name in DEV_MODULES:
-        results.append(check_module(import_name, display_name))
+        results.append(check_module(import_name, display_name, required=True))
 
     print("\n== Tooling ==")
     results.append(check_git())

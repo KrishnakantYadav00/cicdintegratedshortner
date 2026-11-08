@@ -1,0 +1,27 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: url-shortener:latest
+    container_name: url-shortener-app
+    ports:
+      - "${PORT:-5000}:5000"
+    environment:
+      - PORT=5000
+      - DATABASE_URL=sqlite:////data/urls.db
+      - WEB_CONCURRENCY=2
+      - GUNICORN_THREADS=4
+    volumes:
+      - shortener-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:5000/health\")'"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  shortener-data:
+    driver: local

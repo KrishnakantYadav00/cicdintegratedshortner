@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: url-shortener-dev
+    env: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        value: sqlite:////data/urls.db
+    disk:
+      name: shortener-data
+      mountPath: /data
+      sizeGB: 1
+
+  - type: web
+    name: url-shortener-prod
+    env: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: shortener-postgres
+          property: connectionString
+
+databases:
+  - name: shortener-postgres
+    plan: free
+    databaseName: shortener_db
+    user: shortener
