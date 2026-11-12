@@ -169,7 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: dev
-      url: ${{ steps.deploy.outputs.env_url || 'https://dev-shortener.example.com' }}
+      url: ${{ steps.deploy.outputs.env_url || 'https://url-shortner-dev.onrender.com/' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -194,7 +194,7 @@ jobs:
             echo "DEV_DEPLOY_HOOK_URL not configured. Simulated CD execution completed for dev environment."
             echo "To connect live, add DEV_DEPLOY_HOOK_URL in repository Settings -> Environments -> dev -> Secrets."
           fi
-          echo "env_url=https://dev-shortener.example.com" >> $GITHUB_OUTPUT
+          echo "env_url=https://url-shortner-dev.onrender.com/" >> $GITHUB_OUTPUT
 
       - name: Dev Post-Deployment Verification Probe
         if: env.DEV_URL != ''
@@ -224,7 +224,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: ${{ steps.promote.outputs.prod_url || 'https://prod-shortener.example.com' }}
+      url: ${{ steps.promote.outputs.prod_url || 'https://url-shortner-dev.onrender.com/' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -250,7 +250,7 @@ jobs:
             echo "PROD_DEPLOY_HOOK_URL not configured. Simulated CD promotion completed."
             echo "To connect live, add PROD_DEPLOY_HOOK_URL in repository Settings -> Environments -> production -> Secrets."
           fi
-          echo "prod_url=https://prod-shortener.example.com" >> $GITHUB_OUTPUT
+          echo "prod_url=https://url-shortner-dev.onrender.com/" >> $GITHUB_OUTPUT
 
       - name: Production Post-Deployment Smoke Check
         if: env.PROD_URL != ''
